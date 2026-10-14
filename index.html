@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ЩДК · редактор фактів</title>
+<style>
+  :root { --bg:#f6f6f4; --card:#fff; --ink:#1c1c1a; --mut:#6b6b66; --line:#e2e2dd; --acc:#2f5fd0; --ok:#1c8a4a; --bad:#c2392f; --warn:#b7791f; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --card:#201f1e; --ink:#ecebe7; --mut:#9a9992; --line:#33322f; --acc:#7da2ff; --ok:#4cc27f; --bad:#ef7a70; --warn:#e0b04f; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); background:var(--card); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:650; }
+  nav { display:flex; gap:4px; padding:8px 16px 0; flex-wrap:wrap; }
+  nav button { background:none; border:0; border-bottom:2px solid transparent; padding:8px 12px; color:var(--mut); font:inherit; cursor:pointer; }
+  nav button.on { color:var(--ink); border-color:var(--acc); font-weight:600; }
+  main { max-width:900px; margin:0 auto; padding:16px; }
+  input, select, textarea, button { font:inherit; color:inherit; }
+  input, select, textarea { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:7px 10px; }
+  textarea { width:100%; }
+  button.b { background:var(--acc); color:#fff; border:0; border-radius:8px; padding:7px 14px; cursor:pointer; }
+  button.b.ghost { background:none; color:var(--ink); border:1px solid var(--line); }
+  button.b:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:12px; }
+  .card.picked { border-color:var(--ok); } .card.rejected { border-color:var(--bad); opacity:.75; }
+  .fact { font-size:16px; margin:0 0 8px; }
+  .meta { color:var(--mut); font-size:13px; }
+  .quote { border-left:3px solid var(--line); padding-left:10px; color:var(--mut); font-size:13.5px; margin:8px 0; }
+  .score { display:inline-block; min-width:28px; text-align:center; padding:1px 8px; border-radius:99px; font-weight:650; font-size:13px; background:var(--line); }
+  .score.hi { background:var(--ok); color:#fff; } .score.mid { background:var(--warn); color:#fff; }
+  .tag { display:inline-block; font-size:12px; padding:0 8px; border:1px solid var(--line); border-radius:99px; color:var(--mut); margin-right:4px; }
+  .bar { position:sticky; bottom:0; background:var(--card); border-top:1px solid var(--line); padding:10px 16px; display:flex; gap:10px; align-items:center; justify-content:center; }
+  .msg { padding:8px 12px; border-radius:8px; margin-bottom:12px; background:var(--card); border:1px solid var(--line); }
+  .msg.err { border-color:var(--bad); color:var(--bad); }
+  label { display:block; font-size:13px; color:var(--mut); margin-bottom:2px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; margin-bottom:12px; }
+  a { color:var(--acc); } code { font-size:13px; }
+  @media (max-width:520px){ main{padding:12px} }
+</style>
+</head>
+<body>
+<header>
+  <h1>ЩДК · редактор фактів</h1>
+  <input id="repo" placeholder="owner/chgk-engine" size="24">
+  <input id="token" type="password" placeholder="GitHub token" size="22">
+  <button class="b ghost" id="saveCfg">Зберегти</button>
+  <span class="meta" id="who"></span>
+</header>
+<nav id="nav"></nav>
+<main id="main"></main>
+
+<script>
+const $ = (s, r=document) => r.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const store = { get(k){ try { return localStorage.getItem(k) || ''; } catch { return ''; } }, set(k,v){ try { localStorage.setItem(k,v); } catch {} } };
+
+let cfg = { repo: store.get('repo'), token: store.get('token') };
+$('#repo').value = cfg.repo; $('#token').value = cfg.token;
+$('#saveCfg').onclick = () => {
+  cfg = { repo: $('#repo').value.trim(), token: $('#token').value.trim() };
+  store.set('repo', cfg.repo); store.set('token', cfg.token);
+  show(tab);
+};
+
+// ---------- GitHub API ----------
+async function gh(path, opts = {}) {
+  if (!cfg.repo || !cfg.token) throw new Error('Вкажи репо і токен угорі');
+  const r = await fetch('https://api.github.com/repos/' + cfg.repo + path, {
+    ...opts,
+    headers: { 'Accept': 'application/vnd.github+json', 'Authorization': 'Bearer ' + cfg.token, 'X-GitHub-Api-Version': '2022-11-28', ...(opts.headers || {}) },
+  });
+  if (!r.ok) { const t = await r.text(); const e = new Error(`GitHub ${r.status}: ${t.slice(0, 200)}`); e.status = r.status; throw e; }
+  return r.status === 204 ? null : r.json();
+}
+const b64d = s => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, '')), c => c.charCodeAt(0)));
+const b64e = s => { const b = new TextEncoder().encode(s); let bin = ''; b.forEach(x => bin += String.fromCharCode(x)); return btoa(bin); };
+
+async function readFile(path) {
+  try {
+    const j = await gh('/contents/' + path);
+    if (j.content) return { text: b64d(j.content), sha: j.sha };
+    const r = await fetch(j.download_url ? j.download_url : '', { headers: { Authorization: 'Bearer ' + cfg.token } });
+    return { text: await r.text(), sha: j.sha };
+  } catch (e) { if (e.status === 404) return { text: '', sha: null }; throw e; }
+}
+async function writeFile(path, text, sha, message) {
+  return gh('/contents/' + path, { method: 'PUT', body: JSON.stringify({ message, content: b64e(text), ...(sha ? { sha } : {}) }) });
+}
+const parseJsonl = t => t.split('\n').filter(l => l.trim()).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+
+// ---------- UI helpers ----------
+const main = $('#main');
+const flash = (html, err) => { const d = document.createElement('div'); d.className = 'msg' + (err ? ' err' : ''); d.innerHTML = html; main.prepend(d); setTimeout(() => d.remove(), 8000); };
+const loading = () => main.innerHTML = '<p class="meta">Завантаження…</p>';
+const fail = e => { main.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; };
+
+const TABS = { cands: 'Кандидати', corpus: 'Корпус', context: 'Контекст', tasks: 'Таски' };
+let tab = store.get('tab') || 'cands';
+$('#nav').innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-t="${k}">${v}</button>`).join('');
+$('#nav').onclick = e => { const t = e.target.dataset.t; if (t) show(t); };
+function show(t) {
+  tab = t; store.set('tab', t);
+  document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  loading();
+  ({ cands: viewCands, corpus: viewCorpus, context: viewContext, tasks: viewTasks })[t]().catch(fail);
+}
+
+// ---------- Кандидати ----------
+let C = { rows: [], pending: {}, remote: {}, filter: { status: 'new', dir: '', min: 0 } };
+async function viewCands() {
+  const [c, d] = await Promise.all([readFile('out/candidates.jsonl'), readFile('out/decisions.json')]);
+  C.rows = parseJsonl(c.text);
+  try { C.remote = JSON.parse(d.text || '{}'); } catch { C.remote = {}; }
+  renderCands();
+}
+function renderCands() {
+  const f = C.filter;
+  const dirs = [...new Set(C.rows.map(r => r.direction).filter(Boolean))];
+  const dec = id => C.pending[id] || C.remote[id];
+  let rows = C.rows.filter(r => {
+    const d = dec(r.id); const st = d ? d.status : r.status;
+    return (!f.status || (f.status === 'new' ? st === 'new' : st === f.status)) && (!f.dir || r.direction === f.dir) && (r.judge_score || 0) >= f.min;
+  }).sort((a, b) => (b.judge_score || 0) - (a.judge_score || 0));
+  const n = Object.keys(C.pending).length;
+  main.innerHTML = `
+    <div class="row">
+      <select id="fSt"><option value="new">Нові</option><option value="picked">Відібрані</option><option value="rejected">Відхилені</option><option value="">Усі</option></select>
+      <select id="fDir"><option value="">Усі напрями</option>${dirs.map(d => `<option>${esc(d)}</option>`).join('')}</select>
+      <label style="margin:0">мін. оцінка <input id="fMin" type="number" min="0" max="10" value="${f.min}" style="width:60px"></label>
+      <span class="meta">${rows.length} з ${C.rows.length}</span>
+    </div>
+    ${rows.slice(0, 100).map(card).join('') || '<p class="meta">Нічого немає. Запусти таск на вкладці «Таски».</p>'}
+    <div class="bar"><span class="meta">змін: ${n}</span><button class="b" id="commit" ${n ? '' : 'disabled'}>Зберегти рішення в репо</button></div>`;
+  $('#fSt').value = f.status; $('#fDir').value = f.dir;
+  $('#fSt').onchange = e => { f.status = e.target.value; renderCands(); };
+  $('#fDir').onchange = e => { f.dir = e.target.value; renderCands(); };
+  $('#fMin').onchange = e => { f.min = +e.target.value || 0; renderCands(); };
+  main.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => { C.pending[b.dataset.pick] = { status: 'picked' }; renderCands(); });
+  main.querySelectorAll('[data-rej]').forEach(b => b.onclick = () => {
+    const id = b.dataset.rej; const reason = $(`[data-reason="${id}"]`).value.trim();
+    C.pending[id] = { status: 'rejected', reason }; renderCands();
+  });
+  main.querySelectorAll('[data-undo]').forEach(b => b.onclick = () => { delete C.pending[b.dataset.undo]; renderCands(); });
+  $('#commit').onclick = commitDecisions;
+}
+function card(r) {
+  const p = C.pending[r.id]; const s = r.judge_score;
+  const sc = s >= 8 ? 'hi' : s >= 6 ? 'mid' : '';
+  const src = /^https?:\/\//.test(r.source || '') ? `<a href="${esc(r.source)}" target="_blank" rel="noopener noreferrer">${esc(r.source)}</a>` : esc(r.source);
+  const ver = r.quote_verified === true ? '✓ цитату знайдено' : r.quote_verified === false ? '⚠ цитати немає в джерелі' : '';
+  return `<div class="card ${p ? p.status : ''}">
+    <p class="fact">${esc(r.fact)}</p>
+    ${r.quote ? `<div class="quote">${esc(r.quote)}</div>` : ''}
+    <div class="meta"><span class="score ${sc}">${s ?? '–'}</span> ${esc(r.judge_notes || '')} ${ver ? ' · ' + ver : ''}</div>
+    <div class="meta" style="margin:6px 0">${esc(r.why || '')}</div>
+    <div class="meta">${(r.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('')}${esc(r.direction || '')} · ${src}</div>
+    <div class="row" style="margin:10px 0 0">
+      ${p ? `<span class="meta">${p.status === 'picked' ? '✔ відібрано' : '✖ відхилено' + (p.reason ? ': ' + esc(p.reason) : '')}</span><button class="b ghost" data-undo="${esc(r.id)}">Скасувати</button>`
+          : r.status === 'new' ? `<button class="b" data-pick="${esc(r.id)}" style="background:var(--ok)">✔ Взяти</button>
+             <input data-reason="${esc(r.id)}" placeholder="причина відхилення" size="26"><button class="b ghost" data-rej="${esc(r.id)}">✖ Відхилити</button>`
+          : `<span class="meta">${esc(r.status)}${r.reason ? ': ' + esc(r.reason) : ''}</span>`}
+    </div></div>`;
+}
+async function commitDecisions() {
+  const btn = $('#commit'); btn.disabled = true; btn.textContent = 'Зберігаю…';
+  try {
+    const d = await readFile('out/decisions.json');
+    let cur = {}; try { cur = JSON.parse(d.text || '{}'); } catch {}
+    const merged = { ...cur, ...C.pending };
+    await writeFile('out/decisions.json', JSON.stringify(merged, null, 1) + '\n', d.sha, `editor: ${Object.keys(C.pending).length} рішень`);
+    C.remote = merged; C.pending = {};
+    renderCands();
+    flash('Збережено. Action «review» перенесе рішення в корпус за ~30 с; тоді онови сторінку.');
+  } catch (e) { flash(esc(e.message), true); btn.disabled = false; btn.textContent = 'Зберегти рішення в репо'; }
+}
+
+// ---------- Парсер пакетів ----------
+const FIELD = { 'ответ': 'a', 'відповідь': 'a', 'зачёт': 'accept', 'зачет': 'accept', 'залік': 'accept', 'незачёт': 'reject',
+  'комментарий': 'comment', 'коментар': 'comment', 'источник': 'source', 'джерело': 'source', 'автор': 'author' };
+function parsePack(text) {
+  const pack = (text.match(/gotquestions\.online\/pack\/(\d+)/) || [])[1] || '';
+  if (!/^\*\*\d+\.\*\*/m.test(text)) {  // простий txt: блоки через порожній рядок
+    return text.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean).map(q => ({ kind: 'question', q, a: '' }));
+  }
+  const parts = text.split(/^\*\*(\d+)\.\*\*\s*/m), out = [];
+  for (let i = 1; i < parts.length - 1; i += 2) {
+    const rec = { kind: 'question', num: +parts[i], pack, q: '', a: '' };
+    let cur = 'q'; const buf = { q: [] };
+    for (const line of parts[i + 1].split('\n')) {
+      const m = line.trim().match(/^\*\*([^*:]+):\*\*\s*(.*)$/);
+      if (m && FIELD[m[1].trim().toLowerCase()]) { cur = FIELD[m[1].trim().toLowerCase()]; (buf[cur] = buf[cur] || []).push(m[2]); }
+      else if (line.startsWith('## ')) break;
+      else (buf[cur] = buf[cur] || []).push(line);
+    }
+    for (const [k, v] of Object.entries(buf)) rec[k] = v.join('\n').trim().replace(/\n{2,}/g, '\n');
+    if (rec.q && rec.a) out.push(rec);
+  }
+  return out;
+}
+async function shortId(s) {
+  const n = s.trim().toLowerCase().replace(/\s+/g, ' ');
+  const h = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(n));
+  return [...new Uint8Array(h)].slice(0, 5).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ---------- Корпус ----------
+let K = { kind: 'good', q: '' };
+async function viewCorpus() {
+  const f = await readFile(`corpus/${K.kind}.jsonl`);
+  const rows = parseJsonl(f.text);
+  const q = K.q.toLowerCase();
+  const list = rows.filter(r => !q || JSON.stringify(r).toLowerCase().includes(q));
+  main.innerHTML = `
+    <div class="row">
+      <select id="kKind"><option value="good">Хороші</option><option value="bad">Погані</option></select>
+      <input id="kQ" placeholder="пошук" value="${esc(K.q)}">
+      <span class="meta">${list.length} з ${rows.length} (показано до 200)</span>
+    </div>
+    <div class="card">
+      <label>Додати запис у «${K.kind === 'good' ? 'хороші' : 'погані'}»</label>
+      <textarea id="kNew" rows="3" placeholder="питання / факт"></textarea>
+      <div class="row" style="margin-top:8px">
+        ${K.kind === 'bad' ? '<input id="kReason" placeholder="чому поганий" size="30">' : ''}
+        <input id="kDir" placeholder="напрям (необов'язково)" size="22">
+        <button class="b" id="kAdd">Додати</button>
+      </div>
+    </div>
+    <div class="card">
+      <label>Імпорт пакета питань (.md з gotquestions.online або .txt: питання розділені порожнім рядком) у «${K.kind === 'good' ? 'хороші' : 'погані'}»</label>
+      <div class="row" style="margin:6px 0 0"><input type="file" id="kFile" accept=".md,.txt" multiple>
+      ${K.kind === 'bad' ? '<input id="kImpReason" placeholder="причина для всіх" size="22">' : ''}
+      <button class="b" id="kImp">Імпортувати</button><span class="meta" id="kImpMsg"></span></div>
+    </div>
+    ${list.slice(0, 200).map(r => `<div class="card"><div>${esc(r.text || (r.q + (r.a ? ' — ' + r.a : '')))}</div>
+      ${r.comment ? `<div class="quote">${esc(r.comment.slice(0, 400))}</div>` : ''}
+      <div class="meta">${esc(r.direction || '')} ${r.pack ? '· пакет ' + esc(r.pack) : ''} ${r.reason ? '· ← ' + esc(r.reason) : ''}</div></div>`).join('')}`;
+  $('#kImp').onclick = async () => {
+    const files = [...$('#kFile').files]; if (!files.length) return;
+    const msg = $('#kImpMsg'); msg.textContent = 'Читаю…';
+    try {
+      let recs = [];
+      for (const f of files) recs = recs.concat(parsePack(await f.text()));
+      for (const r of recs) {
+        r.id = await shortId((r.q || '') + (r.a || ''));
+        if (K.kind === 'bad') r.reason = ($('#kImpReason') && $('#kImpReason').value.trim()) || 'не підходить';
+      }
+      const cur = await readFile(`corpus/${K.kind}.jsonl`);
+      const have = new Set(parseJsonl(cur.text).map(r => r.id));
+      const fresh = recs.filter(r => !have.has(r.id) && have.add(r.id));
+      if (!fresh.length) { msg.textContent = 'Нових немає (усе вже в корпусі).'; return; }
+      const body = (cur.text && !cur.text.endsWith('\n') ? cur.text + '\n' : cur.text) + fresh.map(r => JSON.stringify(r)).join('\n') + '\n';
+      await writeFile(`corpus/${K.kind}.jsonl`, body, cur.sha, `editor: імпорт ${fresh.length} питань`);
+      show('corpus');
+    } catch (e) { msg.textContent = e.message; }
+  };
+  $('#kKind').value = K.kind;
+  $('#kKind').onchange = e => { K.kind = e.target.value; show('corpus'); };
+  $('#kQ').onchange = e => { K.q = e.target.value; show('corpus'); };
+  $('#kAdd').onclick = async () => {
+    const text = $('#kNew').value.trim(); if (!text) return;
+    const rec = { id: 'm' + Date.now().toString(36), kind: 'question', q: text, direction: $('#kDir').value.trim() };
+    if (K.kind === 'bad') rec.reason = ($('#kReason').value.trim()) || 'не підходить';
+    try {
+      const cur = await readFile(`corpus/${K.kind}.jsonl`);
+      const body = (cur.text && !cur.text.endsWith('\n') ? cur.text + '\n' : cur.text) + JSON.stringify(rec) + '\n';
+      await writeFile(`corpus/${K.kind}.jsonl`, body, cur.sha, 'editor: додано запис у корпус');
+      show('corpus');
+    } catch (e) { flash(esc(e.message), true); }
+  };
+}
+
+// ---------- Контекст ----------
+let X = { file: 'context/brief.md' };
+async function viewContext() {
+  const f = await readFile(X.file);
+  main.innerHTML = `
+    <div class="row"><select id="xF"><option value="context/brief.md">brief.md — що таке хороший факт</option>
+      <option value="context/directions.yaml">directions.yaml — напрями пошуку</option></select>
+      <button class="b" id="xSave">Зберегти</button></div>
+    <textarea id="xT" rows="28" style="font:13px/1.5 ui-monospace,Menlo,monospace">${esc(f.text)}</textarea>
+    <p class="meta">Це те, що модель читає перед кожним запуском. Формат directions.yaml: ключ → title / about / avoid.</p>`;
+  $('#xF').value = X.file;
+  $('#xF').onchange = e => { X.file = e.target.value; show('context'); };
+  $('#xSave').onclick = async () => {
+    try { const cur = await readFile(X.file); await writeFile(X.file, $('#xT').value, cur.sha, `editor: оновлено ${X.file}`); flash('Збережено.'); }
+    catch (e) { flash(esc(e.message), true); }
+  };
+}
+
+// ---------- Таски ----------
+async function viewTasks() {
+  const [dirsF, runsF, wf] = await Promise.all([
+    readFile('context/directions.yaml'), readFile('out/runs.jsonl'),
+    gh('/actions/runs?per_page=8').catch(() => ({ workflow_runs: [] })),
+  ]);
+  const dirs = [...dirsF.text.matchAll(/^([a-z0-9_]+):\s*$/gim)].map(m => m[1]);
+  const stats = parseJsonl(runsF.text).slice(-8).reverse();
+  main.innerHTML = `
+    <div class="card"><div class="grid">
+      <div><label>Напрям</label><input id="tDir" list="dl" style="width:100%"><datalist id="dl">${dirs.map(d => `<option value="${esc(d)}">`).join('')}</datalist></div>
+      <div><label>Джерело</label><select id="tSrc" style="width:100%"><option value="wiki">Вікіпедія</option><option value="web">Веб-пошук</option><option value="local">Локальні тексти</option></select></div>
+      <div><label>Мова</label><input id="tLang" value="uk" style="width:100%"></div>
+      <div><label>Кількість</label><input id="tCount" type="number" value="20" style="width:100%"></div></div>
+      <label>Запити через «;» (Вікіпедія, необов'язково)</label><input id="tQ" style="width:100%;margin-bottom:8px">
+      <label>Файли (для «Локальні тексти»), напр. sources/book/*.txt</label><input id="tFiles" style="width:100%;margin-bottom:8px">
+      <label>Вказівка</label><textarea id="tNote" rows="2" placeholder="напр.: шукай про їжу і напої, 18-19 ст."></textarea>
+      <div class="row" style="margin-top:10px"><button class="b" id="tGo">Запустити</button>
+      <span class="meta">або готовий файл: <input id="tFile" placeholder="tasks/x.yaml" size="20"></span></div></div>
+    <h3>Останні запуски Actions</h3>
+    ${(wf.workflow_runs || []).map(r => `<div class="meta"><a href="${esc(r.html_url)}" target="_blank" rel="noopener noreferrer">${esc(r.name)}</a> · ${esc(r.status)}${r.conclusion ? ' / ' + esc(r.conclusion) : ''} · ${esc(new Date(r.created_at).toLocaleString('uk'))}</div>`).join('') || '<p class="meta">пусто</p>'}
+    <h3>Результати запусків</h3>
+    ${stats.map(s => `<div class="meta">${esc(s.ts)} · ${esc(s.task)} · знайдено ${s.raw}, дублів ${s.dups}, у кандидати ${s.kept}</div>`).join('') || '<p class="meta">ще не було</p>'}`;
+  $('#tGo').onclick = async () => {
+    const inputs = { direction: $('#tDir').value.trim(), source: $('#tSrc').value, lang: $('#tLang').value.trim(), count: String($('#tCount').value || '20'),
+      queries: $('#tQ').value.trim(), files: $('#tFiles').value.trim(), note: $('#tNote').value.trim(), task_file: $('#tFile').value.trim() };
+    if (!inputs.direction && !inputs.task_file) return flash('Вкажи напрям або файл таску', true);
+    if (inputs.task_file) { inputs.source = ''; inputs.lang = ''; inputs.count = ''; }
+    try {
+      const repo = await gh('');
+      await gh('/actions/workflows/harvest.yml/dispatches', { method: 'POST', body: JSON.stringify({ ref: repo.default_branch, inputs }) });
+      flash('Запущено. Результат з\'явиться у «Кандидати» за кілька хвилин.');
+    } catch (e) { flash(esc(e.message), true); }
+  };
+}
+
+show(tab);
+</script>
+</body>
+</html>
